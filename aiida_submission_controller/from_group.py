@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """A prototype class to submit processes in batches, avoiding to submit too many."""
-from aiida import orm
+from aiida.orm import Group, Node, QueryBuilder
 from .base import BaseSubmissionController
 
 
@@ -10,21 +10,25 @@ class FromGroupSubmissionController(BaseSubmissionController):  # pylint: disabl
     This is (still) an abstract base class: you need to subclass it
     and define the abstract methods.
     """
-    def __init__(self, parent_group_label, *args, **kwargs):
+    def __init__(self, parent_group_label, order_by=None, filters=None, *args, **kwargs):
         """Create a new controller to manage (and limit) concurrent submissions.
 
         :param parent_group_label: a group label: the group will be used to decide
           which submissions to use. The group must already exist. Extras (in the method
           `get_all_extras_to_submit`) will be returned from all extras in that group
           (you need to make sure they are unique).
+        :param order_by: operation to order the nodes in the ``parent_group`` by before submission.
+        :param filters: filters to apply to the nodes in the ``parent_group``, if any.
 
         For all other parameters, see the docstring of ``BaseSubmissionController.__init__``.
         """
         super().__init__(*args, **kwargs)
         self._parent_group_label = parent_group_label
         # Load the group (this also ensures it exists)
-        self._parent_group = orm.Group.objects.get(
+        self._parent_group = Group.objects.get(
             label=self.parent_group_label)
+        self._order_by=order_by
+        self._filters=filters
 
     @property
     def parent_group_label(self):
@@ -36,6 +40,16 @@ class FromGroupSubmissionController(BaseSubmissionController):  # pylint: disabl
         """Return the AiiDA ORM Group instance of the parent group."""
         return self._parent_group
 
+    @property
+    def order_by(self):
+        """Return the order_by operation to apply to the query on the ``parent_group``."""
+        return self._order_by
+
+    @property
+    def filters(self):
+        """Return the filters used in the query to obtain the extras to submit."""
+        return self._filters
+
     def get_parent_node_from_extras(self, extras_values):
         """Return the Node instance (in the parent group) from the (unique) extras identifying it."""
         extras_projections = self.get_process_extra_projections()
@@ -44,11 +58,11 @@ class FromGroupSubmissionController(BaseSubmissionController):  # pylint: disabl
         ), f'The extras must be of length {len(extras_projections)}'
         filters = dict(zip(extras_projections, extras_values))
 
-        qbuild = orm.QueryBuilder()
-        qbuild.append(orm.Group,
+        qbuild = QueryBuilder()
+        qbuild.append(Group,
                       filters={'id': self.parent_group.pk},
                       tag='group')
-        qbuild.append(orm.Node,
+        qbuild.append(Node,
                       project='*',
                       filters=filters,
                       tag='process',
@@ -72,26 +86,31 @@ class FromGroupSubmissionController(BaseSubmissionController):  # pylint: disabl
         """
         extras_projections = self.get_process_extra_projections()
 
-        qbuild = orm.QueryBuilder()
-        qbuild.append(orm.Group,
+        qbuild = QueryBuilder()
+        qbuild.append(Group,
                       filters={'id': self.parent_group.pk},
                       tag='group')
-        qbuild.append(orm.Node,
+        qbuild.append(Node,
                       project=extras_projections,
-                      tag='process',
+                      filters=self.filters,
+                      tag='parent',
                       with_group='group')
-        results = qbuild.all()
+
+        if self.order_by is not None:
+            qbuild.order_by(self.order_by)
 
         # I return a set of results as required by the API
         # First, however, convert to a list of tuples otherwise
         # the inner lists are not hashable
-        results = [tuple(_) for _ in results]
+        results = [tuple(_) for _ in qbuild.all()]
+
         for res in results:
             assert all(
                 extra is not None for extra in res
             ), 'There is at least one of the nodes in the parent group that does not define one of the required extras.'
+
         results_set = set(results)
 
-        assert len(results) == len(
-            results_set), 'There are duplicate extras in the parent group'
+        assert len(results) == len(results_set), 'There are duplicate extras in the parent group'
+
         return results_set
